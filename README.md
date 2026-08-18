@@ -29,7 +29,7 @@ WHERE LEFT(CONVERT(VARCHAR(10), o.OrderDate, 120), 4) = '2025'
   AND MONTH(o.OrderDate) BETWEEN 1 AND 6
   AND o.Status = 'Shipped'
 
-This reads naturally and gives the correct result — but it's non-sargable: wrapping a column in a function means the query optimizer can't use an index to seek directly to matching rows. It has to evaluate the function against every row first, forcing a full scan regardless of what indexes exist.
+This reads naturally and gives the correct result — but it's **non-sargable**: wrapping a column in a function means the query optimizer can't use an index to seek directly to matching rows. The function-wrapped column prevents SQL Server from efficiently seeking to the required date range, making a scan much more likely for this access pattern.
 
 Expected plan: Clustered Index Scan across the full Orders table.
 
