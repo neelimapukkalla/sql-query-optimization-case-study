@@ -1,63 +1,104 @@
 # Query Optimization Case Study: Order Reporting Query
 
-**A reproducible before/after case study on diagnosing and fixing a slow order-reporting query — measured on SQL Server Express with SSMS: 52.7% faster (366 ms → 173 ms, a 2.1x speedup) and 96% fewer logical reads on the driving table, by fixing a non-sargable predicate and adding two targeted indexes.**
+**A reproducible before/after case study on diagnosing and fixing a slow order-reporting query — measured on SQL Server Express with SSMS: 52.7% faster (366 ms → 173 ms, a 2.1× speedup) and 96.2% fewer logical reads on the driving table, by fixing a non-SARGable predicate and adding two targeted indexes.**
 
-## The scenario
+## The Scenario
 
-A common reporting request in order/warehouse systems: *"Show me all shipped orders in the first half of 2025, with customer name and order total, ranked highest value first."*
+A common reporting request in order/warehouse systems:
 
-This kind of report gets run often — by finance, by ops, by customer service — and it's exactly the kind of query that quietly gets slower as an orders table grows, until someone notices reports are timing out.
+> **"Show me all shipped orders in the first half of 2025, with customer name and order total, ranked highest value first."**
 
-## Reproducing this yourself
+This type of report may be executed frequently by finance, operations, and customer service teams. As the underlying orders table grows, an inefficient query can gradually become slower and eventually impact report response times.
 
-Everything needed to reproduce these results is in [`warehouse_query_optimization.sql`](./warehouse_query_optimization.sql) — schema, data generation, and both query versions, in order:
+This case study demonstrates how to identify the bottleneck, optimize the query, and measure the improvement using SQL Server execution plans and `STATISTICS IO/TIME`.
 
-1. **Section 01** — creates the schema
-2. **Section 02** — generates the dataset: 5,000 customers, 500,000 orders (2-year date range), ~1.25M order items
-3. **Section 03** — runs the baseline (non-sargable) query with `SET STATISTICS IO/TIME ON`
-4. **Section 04** — adds the two indexes and runs the optimized query, same statistics enabled
-5. **Section 05** — a template for recording your own logical-reads / CPU-time / elapsed-time numbers from your run
+## Reproducing This Yourself
 
-Run the whole script top to bottom in SSMS or Azure Data Studio against a scratch database — no external dependencies.
+Everything needed to reproduce this case study is available in [`warehouse_query_optimization.sql`](warehouse_query_optimization.sql).
 
-## The problem
+The script contains the schema, data generation, baseline query, optimization, and performance measurements:
 
-The original query filtered orders by year and month using string/date functions wrapped around the `OrderDate` column:
+1. **Section 01** — Creates the database schema.
+2. **Section 02** — Generates the dataset:
+
+   * 5,000 customers
+   * 500,000 orders covering a 2-year date range
+   * Approximately 1.25 million order items
+3. **Section 03** — Runs the baseline non-SARGable query with `SET STATISTICS IO/TIME ON`.
+4. **Section 04** — Adds the two targeted indexes and runs the optimized query with the same statistics enabled.
+5. **Section 05** — Provides a template for recording logical reads, CPU time, and elapsed time from your own execution.
+
+Run the script from top to bottom in **SQL Server Management Studio (SSMS)** or **Azure Data Studio** against a scratch database.
+
+No external dependencies are required.
+
+---
+
+## The Problem
+
+The original query filtered orders by year and month using functions applied to the `OrderDate` column:
 
 ```sql
 WHERE LEFT(CONVERT(VARCHAR(10), o.OrderDate, 120), 4) = '2025'
   AND MONTH(o.OrderDate) BETWEEN 1 AND 6
-  AND o.Status = 'Shipped'
+  AND o.Status = 'Shipped';
 ```
 
-This reads naturally and gives the correct result — but it's **non-sargable**: wrapping a column in a function means the query optimizer can't use an index to seek directly to matching rows. The function-wrapped column prevents SQL Server from efficiently seeking to the required date range, making a scan much more likely for this access pattern.
+The query returns the correct results, but the predicate is **non-SARGable** because functions are applied to the indexed `OrderDate` column.
 
-**Actual plan (captured via SSMS, Ctrl+M):** Clustered Index Scan on Orders.
+When a column is wrapped in functions, SQL Server cannot efficiently use that column to seek directly to the required date range. For this access pattern, this makes a scan much more likely.
 
-![Before: Clustered Index Scan](./before-execution-plan.png)
+### Before Optimization — Execution Plan
 
-**Actual measured numbers** (`SET STATISTICS IO/TIME ON`, SQL Server Express, local instance):
+The actual execution plan was captured in SSMS using **Include Actual Execution Plan (Ctrl+M)**.
 
-| | Orders | OrderItems | Customers |
-|---|---|---|---|
-| Logical reads | 2,245 | 5,270 | 25 |
+The `Orders` table is accessed using a **Clustered Index Scan**.
 
-CPU time = 156 ms, elapsed time = 366 ms.
+![Before Optimization Execution Plan](before-execution-plan.png)
 
-![Before: STATISTICS IO/TIME output](./before-statistics.png)
+### Before Optimization — STATISTICS IO/TIME
 
-## The fix
-
-Two changes, neither of which touched the business logic or the result set:
-
-**1. Rewrote the predicate to be sargable** — a plain range comparison instead of a function wrapping the column:
+The following measurements were captured using:
 
 ```sql
-WHERE o.OrderDate >= '2025-01-01' AND o.OrderDate < '2025-07-01'
-  AND o.Status = 'Shipped'
+SET STATISTICS IO ON;
+SET STATISTICS TIME ON;
 ```
 
-**2. Added two targeted indexes**, chosen to match how this query filters and joins:
+| Table      | Logical Reads |
+| ---------- | ------------: |
+| Orders     |         2,245 |
+| OrderItems |         5,270 |
+| Customers  |            25 |
+
+**CPU time:** 156 ms
+**Elapsed time:** 366 ms
+
+![Before Optimization Statistics](before-statistics.png)
+
+---
+
+## The Fix
+
+Two changes were made without changing the business logic or the result set.
+
+### 1. Rewrote the Predicate to Be SARGable
+
+Instead of applying functions to `OrderDate`, the query uses a direct date range:
+
+```sql
+WHERE o.OrderDate >= '2025-01-01'
+  AND o.OrderDate < '2025-07-01'
+  AND o.Status = 'Shipped';
+```
+
+This allows SQL Server to use the `OrderDate` portion of an appropriate index to efficiently identify the required date range.
+
+Using an exclusive upper bound (`< '2025-07-01'`) also avoids time-of-day issues when `OrderDate` contains a time component.
+
+### 2. Added Two Targeted Indexes
+
+The indexes were designed around the query's filtering and joining requirements:
 
 ```sql
 CREATE INDEX IX_Orders_Status_OrderDate
@@ -69,52 +110,119 @@ CREATE INDEX IX_OrderItems_OrderID
     INCLUDE (Quantity, UnitPrice);
 ```
 
-**Why this column order:** `Status` is an equality predicate, so it leads the composite index; `OrderDate` is a range predicate, so it comes second (range predicates should trail equality predicates in a composite index, otherwise the range breaks the seek early). `CustomerID` is included, not keyed, purely to avoid a separate key lookup when joining to `Customers`.
+### Why This Column Order?
 
-**Actual plan after the fix:** Index Seek on `IX_Orders_Status_OrderDate` — both the status filter and the date range are used directly in the seek. `OrderItems` shows an **Index Scan** (not a seek) on the nonclustered covering index `IX_OrderItems_OrderID` — this is expected, since the query joins to `OrderID` rather than filtering on it directly, so SQL Server scans the narrow covering index instead of the wide clustered table. That's still a large improvement over the original clustered-index scan, just not a seek, and it's worth understanding *why* rather than assuming every fix produces a seek everywhere.
+The `Orders` index is defined as:
 
-![After: Index Seek](./after-execution-plan.png)
+```text
+(Status, OrderDate)
+```
 
-**Actual measured numbers:**
+* `Status` is used with an equality predicate, so it leads the composite index.
+* `OrderDate` is used for the date range, so it follows `Status`.
+* `CustomerID` is included because it is needed by the join but does not need to be part of the index key.
 
-| | Orders | OrderItems | Customers |
-|---|---|---|---|
-| Logical reads | 85 | 4,197 | 25 |
+This allows SQL Server to use the index efficiently for the combination of the status filter and date range while also having `CustomerID` available without requiring an additional lookup for that column.
 
-CPU time = 94 ms, elapsed time = 173 ms.
+### After Optimization — Execution Plan
 
-![After: STATISTICS IO/TIME output](./after-statistics.png)
+After the changes, the `Orders` table is accessed using an **Index Seek** on `IX_Orders_Status_OrderDate`.
 
-## Result
+Both the `Status` equality predicate and the `OrderDate` range predicate can be applied using the index.
 
-| | Before | After | Change |
-|---|---|---|---|
-| Elapsed time | 366 ms | 173 ms | **52.7% faster (2.1x speedup)** |
-| CPU time | 156 ms | 94 ms | 39.7% faster |
-| Orders logical reads | 2,245 | 85 | 96.2% fewer reads |
-| Total logical reads (all tables) | 7,540 | 4,307 | 42.9% fewer reads |
-| Orders plan | Clustered Index Scan | Index Seek | |
+For `OrderItems`, SQL Server uses an **Index Scan** on the narrower covering nonclustered index `IX_OrderItems_OrderID`.
 
-These are real numbers captured from a local SQL Server Express instance using `SET STATISTICS IO/TIME ON` and SSMS's actual execution plan — not estimates. Full reproduction steps are in [`warehouse_query_optimization.sql`](./warehouse_query_optimization.sql).
+This is expected for this query plan. The query does not first filter `OrderItems` to a small range of `OrderID` values; instead, SQL Server can scan the narrower covering index to obtain the required columns for the join and aggregation.
 
-## Skills demonstrated
+The important improvement is that the large `Orders` driving table is no longer accessed through a clustered index scan.
 
-- T-SQL
-- SQL Server query optimization
-- SARGability / sargable predicate design
-- Execution plan analysis (Index Seek vs. Index Scan)
-- Composite index design and column ordering
-- Covering indexes (`INCLUDE` columns)
-- `SET STATISTICS IO / TIME` for query diagnostics
-- JOIN and `GROUP BY` optimization
-- Query performance benchmarking methodology
+![After Optimization Execution Plan](after-execution-plan.png)
 
-## Why this pattern matters beyond this one query
+### After Optimization — STATISTICS IO/TIME
 
-The gap between a scan and a seek doesn't stay this size — it grows with the table. On 500K rows the difference is already meaningful; on a multi-million-row orders table (which a busy order/shipment system reaches within a year or two of real traffic), this same non-sargable pattern is often the exact reason a report that used to run in under a second starts timing out — especially once several people run it concurrently.
+The same measurement method was used after optimization:
 
-This is one of the first things I check when someone brings me a "our report got slow" problem: look for functions wrapped around indexed columns in the `WHERE` clause before assuming the fix has to be structural or expensive.
+```sql
+SET STATISTICS IO ON;
+SET STATISTICS TIME ON;
+```
+
+| Table      | Logical Reads |
+| ---------- | ------------: |
+| Orders     |            85 |
+| OrderItems |         4,197 |
+| Customers  |            25 |
+
+**CPU time:** 94 ms
+**Elapsed time:** 173 ms
+
+![After Optimization Statistics](after-statistics.png)
 
 ---
 
-*Schema and dataset built specifically for this case study to demonstrate the diagnostic process clearly, at a scale similar to what I work with day-to-day maintaining reporting queries for a production ERP system (Warehouse Management, Sales Orders, Shipment modules).*
+## Result
+
+| Metric               |               Before |      After |                     Improvement |
+| -------------------- | -------------------: | ---------: | ------------------------------: |
+| Elapsed time         |               366 ms |     173 ms | **52.7% faster (2.1× speedup)** |
+| CPU time             |               156 ms |      94 ms |                 **39.7% lower** |
+| Orders logical reads |                2,245 |         85 |           **96.2% fewer reads** |
+| Total logical reads  |                7,540 |      4,307 |           **42.9% fewer reads** |
+| Orders access method | Clustered Index Scan | Index Seek |        **Improved access path** |
+
+These measurements were captured from a local **SQL Server Express** instance using `SET STATISTICS IO/TIME ON` and SSMS's actual execution plan.
+
+The exact elapsed time can vary depending on hardware, SQL Server configuration, data cache state, and system load. The logical-read reduction and execution-plan changes provide additional evidence of the optimization.
+
+Full reproduction steps are available in [`warehouse_query_optimization.sql`](warehouse_query_optimization.sql).
+
+---
+
+## Skills Demonstrated
+
+* T-SQL
+* SQL Server Query Optimization
+* SARGability / SARGable Predicate Design
+* Execution Plan Analysis
+* Index Seek vs. Index Scan
+* Composite Index Design
+* Composite Index Column Ordering
+* Covering Indexes
+* `INCLUDE` Columns
+* `SET STATISTICS IO`
+* `SET STATISTICS TIME`
+* JOIN and `GROUP BY` Analysis
+* Query Performance Benchmarking
+
+---
+
+## Why This Pattern Matters Beyond This Query
+
+The performance impact of inefficient access patterns generally becomes more significant as tables grow.
+
+On a 500K-row orders table, the difference is already measurable. On a multi-million-row orders table, repeatedly scanning a large table can consume substantially more I/O and CPU resources, especially when multiple users execute similar reports concurrently.
+
+One useful first step when investigating a slow reporting query is to examine the execution plan and look for predicates that prevent efficient index usage, including functions applied directly to indexed columns.
+
+This case study demonstrates that process:
+
+**Identify the bottleneck → measure the baseline → make the predicate SARGable → design targeted indexes → measure again → validate the execution plan.**
+
+---
+
+## Project Structure
+
+```text
+sql-query-optimization-case-study/
+│
+├── warehouse_query_optimization.sql
+├── before-execution-plan.png
+├── after-execution-plan.png
+├── before-statistics.png
+├── after-statistics.png
+└── README.md
+```
+
+---
+
+*Schema and dataset were built specifically for this case study to demonstrate the diagnostic and optimization process using a realistic order/warehouse reporting scenario.*
