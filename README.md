@@ -54,7 +54,9 @@ The actual execution plan was captured in SSMS using **Include Actual Execution 
 
 The `Orders` table is accessed using a **Clustered Index Scan**.
 
-![Before Optimization Execution Plan](before-execution-plan.png)
+![Before Optimization Execution Plan](./before-execution-plan.png)
+
+
 
 ### Before Optimization — STATISTICS IO/TIME
 
@@ -74,7 +76,7 @@ SET STATISTICS TIME ON;
 **CPU time:** 156 ms
 **Elapsed time:** 366 ms
 
-![Before Optimization Statistics](before-statistics.png)
+![Before Optimization Statistics](./before-statistics.png)
 
 ---
 
@@ -136,7 +138,7 @@ This is expected for this query plan. The query does not first filter `OrderItem
 
 The important improvement is that the large `Orders` driving table is no longer accessed through a clustered index scan.
 
-![After Optimization Execution Plan](after-execution-plan.png)
+![After Optimization Execution Plan](./after-execution-plan.png)
 
 ### After Optimization — STATISTICS IO/TIME
 
@@ -156,8 +158,7 @@ SET STATISTICS TIME ON;
 **CPU time:** 94 ms
 **Elapsed time:** 173 ms
 
-![After Optimization Statistics](after-statistics.png)
-
+![After Optimization Statistics](./after-statistics.png)
 ---
 
 ## Result
