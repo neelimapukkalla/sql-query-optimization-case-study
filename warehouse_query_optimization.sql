@@ -95,8 +95,9 @@ UNION ALL SELECT 'OrderItems', COUNT(*) FROM OrderItems;
 --
 -- This version pulls the date apart with functions to filter by
 -- year/month. It reads naturally, but wrapping OrderDate in a
--- function means SQL Server can't seek an index on OrderDate —
--- it has to evaluate the function against every row, forcing a scan.
+-- function prevents SQL Server from efficiently using an index
+-- seek on the OrderDate portion of the predicate, making a scan
+-- much more likely for this access pattern.
 
 SET STATISTICS IO ON;
 SET STATISTICS TIME ON;
@@ -134,8 +135,9 @@ CREATE INDEX IX_Orders_Status_OrderDate
                                      -- OrderDate: range predicate (second column,
                                      --   since range predicates should trail equality
                                      --   predicates in a composite index)
-    INCLUDE (CustomerID);           -- included so the join to Customers doesn't
-                                     -- require a separate key lookup
+    INCLUDE (CustomerID); -- included so CustomerID is available from
+-- the nonclustered index without requiring a lookup to the
+-- clustered index for this column.
 
 CREATE INDEX IX_OrderItems_OrderID
     ON OrderItems (OrderID)
@@ -163,10 +165,15 @@ ORDER BY OrderTotal DESC;
 SET STATISTICS IO OFF;
 SET STATISTICS TIME OFF;
 
--- Expected plan after this change: Index Seek on
--- IX_Orders_Status_OrderDate (both Status and the OrderDate range
--- used directly in the seek predicate), Index Seek on
--- IX_OrderItems_OrderID for the join — no full table scan.
+-- Expected plan after this change:
+-- Index Seek on IX_Orders_Status_OrderDate.
+-- Both Status and the OrderDate range can be used efficiently
+-- in the seek predicate.
+--
+-- OrderItems may use an Index Scan on IX_OrderItems_OrderID.
+-- This is expected for this query because OrderItems is accessed
+-- through the join and SQL Server can scan the narrower covering
+-- nonclustered index instead of the wider clustered table.
 
 
 -- ============================================================
